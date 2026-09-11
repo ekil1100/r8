@@ -1,6 +1,6 @@
 # r8 ECMAScript 实现计划
 
-状态：待实施。当前切片：S00。
+状态：r8 测试框架已建立 JS 用例发现、metadata、输入准备、原生 worker 与报告链路，见[测试说明](../evals/README.md)。r8 解析器和 VM 尚未实现，执行入口待接入，当前语言用例全部未实现；当前切片仍为 S00。
 
 目标：用 Rust 自研 ECMAScript 引擎，先交付可运行 MVP，再通过纵向切片扩展到固定版本的标准。开发方式与源码参考遵循 [AGENTS.md](../AGENTS.md)；本计划定义范围、顺序和验收依据。
 
@@ -38,7 +38,7 @@
 
 ### 拟定 CLI 契约
 
-以下是实施目标，当前尚无可执行程序：
+以下是引擎 CLI 的实施目标；当前提供的是 r8 测试框架 `r8-eval`，尚无可执行 JS 的 r8 解释器：
 
 - S00 提供 `r8 -e '<source>'`；S01 增加 Script 文件入口；S16 增加显式 Module 文件入口。
 - `-e` 执行 Script，并在结果非 `undefined` 时输出其字符串表示。CLI 展示行为与引擎返回的语言值分开测试。
@@ -118,13 +118,13 @@ cargo run -- -e '1 +'
 
 ### 分期接入
 
-- **S00–S05**：先用 Rust 集成测试验证同一条源码执行链路。可选择不依赖未实现能力的原始 Test262 用例，但只有满足其全部运行约定才计入正式结果；完整 runner 不阻塞 MVP。
-- **S06**：固定 Test262 commit 和解释规则版本，先让原始 `assert.js`、`sta.js` 及所选 `includes` 在引擎中正确执行，再提交第一批正式通过清单。runner 使用同一引擎库，不为测试另造一套语言实现。
+- **S00–S05**：自有语言评测优先采用原生 `.js` 断言和 `negative` metadata；引擎尚不能执行 harness 时，用 Rust 集成测试验证同一条源码执行链路。可选择不依赖未实现能力的原始 Test262 用例，但只有满足其全部运行约定才计入正式结果；完整 runner 不阻塞 MVP。
+- **S06**：固定正式测试集的 Test262 commit 和解释规则版本，先让原始 `assert.js`、`sta.js` 及所选 `includes` 在引擎中正确执行，再提交第一批正式通过清单。runner 只调用 r8 的同一引擎库，未实现时明确报告，不以其他引擎代跑或另造测试专用的语言实现。
 - **S14–S20**：随语言能力补上异步完成协议、模块 fixtures、多 Realm、GC、buffer detach 和 agent 测试接口，每项接口均有 runner 自测。
 
 ### 执行约定
 
-实施或修改 runner 前读取 [INTERPRETING.md][interpreting]，并遵循所固定 revision 的规则，尤其是：
+实施或修改 runner 前，从[评测说明](../evals/README.md)确认锁定的解释规则，读取该 revision 的 `INTERPRETING.md`，尤其遵循：
 
 - 每个测试变体使用独立 Realm；按 `onlyStrict`、`noStrict`、`module`、`raw` 等标记选择执行方式。默认 strict/non-strict 双跑不能漏计；`raw` 不注入 harness、不改写源码。
 - 按顺序装载 harness；将测试体的语法/early errors、模块 resolution 错误与 runtime 异常分开判断。负例同时匹配阶段和错误类型，harness 失败不能满足测试体的预期异常。

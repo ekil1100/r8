@@ -2,6 +2,8 @@
 
 实现 ECMAScript 能力、选择下一切片或调整标准范围时，先读取 [.agents/ecmascript-plan.md](.agents/ecmascript-plan.md)。
 
+新增 JS 测试用例或修改测试准备、r8 执行接入、结果报告时，先读取 [evals/README.md](evals/README.md)。
+
 ## 纵向切片
 
 - **定义切片**：每次选择一项可执行的 JS 能力，先明确源码输入及预期结果或错误。
