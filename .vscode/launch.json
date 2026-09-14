@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "r8: 调试选中的 JS",
+            "cargo": {
+                "args": ["build", "--bin", "r8"],
+                "filter": {
+                    "name": "r8",
+                    "kind": "bin"
+                }
+            },
+            "args": ["-e", "${selectedText}"],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

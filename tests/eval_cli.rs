@@ -35,7 +35,105 @@ fn report(output: &Output) -> Value {
 }
 
 #[test]
-fn r8_suite_needs_no_external_engine_and_reports_pending_execution_honestly() {
+fn executes_raw_cases_and_preserves_real_error_phases() {
+    let nested = format!(
+        "/*---\nflags: [raw]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n{}1{}",
+        "(".repeat(256),
+        ")".repeat(256)
+    );
+    let output = run_files(
+        &[
+            ("a-complete.js", "/*---\nflags: [raw]\n---*/\n1 + 2 * 3;"),
+            (
+                "b-parse.js",
+                "/*---\nflags: [raw]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n1 +",
+            ),
+            ("c-unexpected.js", "/*---\nflags: [raw]\n---*/\n1)"),
+            (
+                "d-no-error.js",
+                "/*---\nflags: [raw]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n1 + 2",
+            ),
+            (
+                "e-wrong-phase.js",
+                "/*---\nflags: [raw]\nnegative:\n  phase: runtime\n  type: SyntaxError\n---*/\n1 +",
+            ),
+            ("f-unsupported.js", "/*---\nflags: [raw]\n---*/\nlet x = 1;"),
+            (
+                "g-unsupported-negative.js",
+                "/*---\nflags: [raw]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nlet x = 1;",
+            ),
+            ("h-limited.js", &nested),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report = report(&output);
+    assert_eq!(report["summary"]["total"], 8);
+    assert_eq!(report["summary"]["pass"], 2);
+    assert_eq!(report["summary"]["fail"], 3);
+    assert_eq!(report["summary"]["skip"], 2);
+    assert_eq!(report["summary"]["harness-error"], 1);
+    assert_eq!(report["results"][0]["actual"]["kind"], "completed");
+    assert_eq!(report["results"][1]["actual"]["name"], "SyntaxError");
+    assert_eq!(report["results"][4]["actual"]["phase"], "parse");
+    assert!(
+        report["results"][7]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("ResourceLimit")
+    );
+}
+
+#[test]
+fn parse_negatives_do_not_execute_helpers_or_accept_harness_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let harness = directory.path().join("harness");
+    fs::create_dir(&harness).unwrap();
+    fs::write(harness.join("assert.js"), "1 +").unwrap();
+    fs::write(harness.join("sta.js"), "").unwrap();
+    let output = run_files(
+        &[
+            (
+                "a-parse.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n1 +",
+            ),
+            (
+                "b-no-error.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n1 + 2",
+            ),
+            (
+                "c-harness-error.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: runtime\n  type: SyntaxError\n---*/\n1 + 2",
+            ),
+            (
+                "d-missing-include.js",
+                "/*---\nflags: [noStrict]\nincludes: [missing.js]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n1 +",
+            ),
+        ],
+        &["--harness", harness.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report = report(&output);
+    assert_eq!(report["summary"]["pass"], 1);
+    assert_eq!(report["summary"]["fail"], 1);
+    assert_eq!(report["summary"]["harness-error"], 2);
+    assert_eq!(report["results"][1]["actual"]["kind"], "completed");
+    assert!(
+        report["results"][2]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("assert.js")
+    );
+    assert!(
+        report["results"][3]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("missing.js")
+    );
+}
+
+#[test]
+fn r8_suite_uses_the_native_engine_and_keeps_pending_capabilities_visible() {
     let output = run_path(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/cases/s00"),
         &[],
@@ -50,23 +148,39 @@ fn r8_suite_needs_no_external_engine_and_reports_pending_execution_honestly() {
     assert_eq!(report["engine"], "r8");
     assert_eq!(report["files"], 22);
     assert_eq!(report["summary"]["total"], 44);
-    assert_eq!(report["summary"]["pass"], 0);
-    assert_eq!(report["summary"]["skip"], 44);
+    assert_eq!(report["summary"]["pass"], 5);
+    assert_eq!(report["summary"]["skip"], 39);
+    let parsed_negatives = [
+        "invalid-token.js",
+        "missing-operand.js",
+        "trailing-number.js",
+        "unclosed-parenthesis.js",
+        "unexpected-parenthesis.js",
+    ];
     for result in report["results"].as_array().unwrap() {
-        assert_eq!(result["status"], "skip");
-        assert_eq!(result["actual"]["kind"], "unsupported");
-        assert!(result["diagnostic"].as_str().unwrap().contains("r8"));
+        if result["variant"] == "non-strict"
+            && parsed_negatives.contains(&result["id"].as_str().unwrap())
+        {
+            assert_eq!(result["status"], "pass");
+            assert_eq!(result["actual"]["kind"], "error");
+            assert_eq!(result["actual"]["phase"], "parse");
+            assert_eq!(result["actual"]["name"], "SyntaxError");
+        } else {
+            assert_eq!(result["status"], "skip");
+            assert_eq!(result["actual"]["kind"], "unsupported");
+            assert!(result["diagnostic"].as_str().unwrap().contains("r8"));
+        }
     }
 }
 
 #[test]
-fn unavailable_r8_execution_never_satisfies_positive_or_negative_tests() {
+fn unsupported_capabilities_never_satisfy_positive_or_negative_tests() {
     let output = run_files(
         &[
             ("a-positive.js", "assert.sameValue(1 + 2, 3);"),
             (
                 "b-parse.js",
-                "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n1 +",
+                "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nlet x = 1;",
             ),
             (
                 "c-runtime.js",
@@ -119,7 +233,8 @@ fn expands_execution_modes_and_keeps_unsupported_requirements_in_the_denominator
     let report = report(&output);
     assert_eq!(report["files"], 9);
     assert_eq!(report["summary"]["total"], 14);
-    assert_eq!(report["summary"]["skip"], 14);
+    assert_eq!(report["summary"]["pass"], 1);
+    assert_eq!(report["summary"]["skip"], 13);
     assert_eq!(report["results"][0]["variant"], "non-strict");
     assert_eq!(report["results"][1]["variant"], "strict");
     assert_eq!(report["results"][4]["variant"], "raw");
@@ -208,9 +323,10 @@ fn raw_tests_do_not_require_a_harness_directory() {
         )],
         &["--harness", missing.to_str().unwrap()],
     );
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let report = report(&output);
-    assert_eq!(report["summary"]["skip"], 1);
+    assert_eq!(report["summary"]["pass"], 1);
+    assert_eq!(report["summary"]["skip"], 0);
     assert_eq!(report["summary"]["harness-error"], 0);
 }
 

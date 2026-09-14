@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::protocol::{Outcome, Request};
+use crate::protocol::{Outcome, Phase, Request};
 
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
 
@@ -76,11 +76,41 @@ pub fn worker() -> io::Result<()> {
     writeln!(stdout)
 }
 
-fn execute_r8(_request: &Request) -> Outcome {
-    // Connect the real r8 parser and VM here when the engine library exists.
-    Outcome::Unsupported {
-        reason: "r8 parser and VM are not implemented yet.".into(),
+fn execute_r8(request: &Request) -> Outcome {
+    let script = match r8::Script::parse(&request.source) {
+        Ok(script) => script,
+        Err(error) => {
+            let message = format!("r8: {}: {error}", request.filename);
+            return match error.kind {
+                r8::ErrorKind::Syntax => Outcome::Error {
+                    phase: Phase::Parse,
+                    name: Some("SyntaxError".into()),
+                    message,
+                },
+                r8::ErrorKind::Unsupported => Outcome::Unsupported { reason: message },
+                r8::ErrorKind::ResourceLimit => Outcome::HarnessError { message },
+            };
+        }
+    };
+    if request.parse_only {
+        return Outcome::Completed {};
     }
+    for helper in &request.harness {
+        match r8::Script::parse(&helper.source) {
+            Ok(helper) => {
+                helper.run();
+            }
+            Err(error) => {
+                let message = format!("r8 harness {}: {error}", helper.filename);
+                return match error.kind {
+                    r8::ErrorKind::Unsupported => Outcome::Unsupported { reason: message },
+                    _ => Outcome::HarnessError { message },
+                };
+            }
+        }
+    }
+    script.run();
+    Outcome::Completed {}
 }
 
 fn capture(request: &Request, timeout: Duration) -> io::Result<(Stop, Vec<u8>, Vec<u8>)> {

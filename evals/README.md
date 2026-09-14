@@ -2,7 +2,7 @@
 
 本框架的测试对象只有 r8。用例保存在 `.js` 中，以 JS 断言或 Test262 `negative` metadata 表达预期；Rust 负责发现、准备、隔离与报告。
 
-**当前只有框架，尚无 r8 解析器和 VM。** `src/eval/executor.rs` 的 `execute_r8` 是执行接入点，目前明确返回 unsupported。已有用例不能执行，因此报告 skip，而不是通过。
+`src/eval/executor.rs` 的 `execute_r8` 已接入 r8 的 S00 引擎库。raw 算术用例可以执行，范围内的 parse 负例由真实解析器判定；依赖 strict 指令、更新运算、其他值类型或官方断言 harness 的用例仍报告 unsupported/skip。
 
 ## 运行
 
@@ -52,7 +52,7 @@ negative:
 
 需要观察独立 Script 的完成值时，用例可调用 `$262.evalScript`；该宿主接口也需要在 r8 中实现，目前不能执行。
 
-`cases/s00/` 检查 S00 算术行为，但 JS 断言依赖函数、对象、异常等能力。引擎尚不能执行 harness 时，按[实现计划](../.agents/ecmascript-plan.md)用调用真实 r8 执行链路的 Rust 集成测试建立早期保障。
+`cases/s00/` 检查 S00 算术行为，但 JS 断言依赖函数、对象、异常等能力。目前 44 个变体中有 5 个非严格模式解析负例通过、39 个 skip；算术值、负零等由 `tests/engine.rs` 和 `tests/engine_cli.rs` 通过同一真实执行链路验证。阶段边界见[实现计划](../.agents/ecmascript-plan.md)。
 
 ## 当前已实现的准备流程
 
@@ -71,19 +71,18 @@ negative:
 
 读取 harness 文件成功，只说明输入已准备好，不代表 r8 已执行 harness 或测试体。
 
-## 接入 r8 执行器
+## r8 执行器
 
 每个可准备的变体启动同一 Rust 二进制的内部 worker，不从 PATH 查找引擎。JSON 是父子进程之间的内部传输格式，不是外部引擎插件协议。
 
-r8 引擎库建立后，在 `executor.rs::execute_r8` 中接入同一套解析器和 VM，按以下约定逐项实现并验收：
+`executor.rs::execute_r8` 与 CLI 共用 `r8::Script::parse` 和 `Script::run`：
 
-1. 为每个变体创建独立的 r8 执行上下文，提供该切片所需的测试宿主接口。
-2. 单独解析测试体，区分语法/early errors 与未实现能力。`parse_only` 请求只解析，不执行测试体或 harness；解析成功不能满足 parse 负例。
-3. 需要求值时，先在测试上下文全局作用域中执行准备好的 harness，再执行测试体。harness 初始化或执行失败单独报告为 harness-error，不能满足测试体的 negative 预期。
-4. 正常完成报告 completed；未捕获异常报告真实阶段、错误类型和诊断。`negative` 必须同时匹配阶段与类型。
-5. 缺失的引擎能力和宿主接口保持 unsupported。只有真实执行完成才能报告通过，不根据源码内容猜测结果，也不调用其他引擎代跑。
+1. 单独解析并编译测试体，区分真实语法错误、未实现能力和宿主资源限制。`parse_only` 请求到此结束，不执行测试体或解析/执行 harness；解析成功不能满足 parse 负例。
+2. 需要求值时，按准备顺序解析并执行 harness，再运行测试体。harness 的未实现能力报告 skip，其他 harness 故障报告 harness-error；均不能满足测试体的 negative 预期。输入文件存在性和路径安全检查仍在 worker 启动前完成。
+3. 正常完成报告 completed；语法错误报告 parse 阶段与 SyntaxError。`negative` 同时匹配阶段与类型。宿主资源限制报告 harness-error，不伪装为语言异常。
+4. 缺失能力保持 unsupported；更新运算等未支持语法中的负例也不能猜测为 SyntaxError。执行到未知语法时不采信已解析的前缀。
 
-目前上述 JS 执行能力均待接入。完整 Test262 集合、异步、Module、多 Realm、GC、buffer detach 和 agent 接口按实现计划逐项补齐。
+S00 只有无状态算术和独立操作数栈，暂无 Realm、全局绑定或 `$262` 接口。引入状态后，同一变体的 harness 和测试体必须共享执行上下文，不同变体保持隔离；引入语言异常后再补 runtime 类型映射。完整 Test262 集合、异步、Module、多 Realm、GC、buffer detach 和 agent 接口按实现计划逐项补齐。
 
 ## 报告与资源限制
 
@@ -104,4 +103,4 @@ r8 引擎库建立后，在 `executor.rs::execute_r8` 中接入同一套解析�
 - 只回收直接子进程；未来测试宿主派生的进程由宿主负责管理。耗时包含进程启动，不作为解释器吞吐量基准。
 - 进程隔离不是安全沙箱；只运行可信用例，不隔离宿主文件、网络或凭据。
 
-框架自检通过公开 CLI 验证发现、metadata、输入边界、无外部程序依赖以及未实现状态的报告。r8 接入后，还需用真实执行回归验证断言、异常、宿主行为及资源限制；当前自检成功不代表这些语言行为已通过。
+框架自检通过公开 CLI 验证发现、metadata、输入边界、无外部程序依赖、raw 执行、parse 负例、harness 失败与资源限制分类。完整断言、运行期异常和宿主行为仍待对应能力实现后验收。

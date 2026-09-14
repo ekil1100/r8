@@ -1,6 +1,6 @@
 # r8 ECMAScript 实现计划
 
-状态：r8 测试框架已建立 JS 用例发现、metadata、输入准备、原生 worker 与报告链路，见[测试说明](../evals/README.md)。r8 解析器和 VM 尚未实现，执行入口待接入，当前语言用例全部未实现；当前切片仍为 S00。
+状态：S00 已完成并验收；下一切片 S01 尚未开始。引擎库、算术 CLI 与测试框架已共用真实解析和 VM 链路；JS 集合的剩余能力缺口见[测试说明](../evals/README.md)。
 
 目标：用 Rust 自研 ECMAScript 引擎，先交付可运行 MVP，再通过纵向切片扩展到固定版本的标准。开发方式与源码参考遵循 [AGENTS.md](../AGENTS.md)；本计划定义范围、顺序和验收依据。
 
@@ -38,7 +38,7 @@
 
 ### 拟定 CLI 契约
 
-以下是引擎 CLI 的实施目标；当前提供的是 r8 测试框架 `r8-eval`，尚无可执行 JS 的 r8 解释器：
+以下为分阶段 CLI 契约；S00 的 `r8 -e` 与调用同一引擎库的 `r8-eval` 已实现：
 
 - S00 提供 `r8 -e '<source>'`；S01 增加 Script 文件入口；S16 增加显式 Module 文件入口。
 - `-e` 执行 Script，并在结果非 `undefined` 时输出其字符串表示。CLI 展示行为与引擎返回的语言值分开测试。
@@ -69,6 +69,15 @@ cargo run -- -e '1 +'
 - 保留 `NaN`、正负零、无穷大的 Number 语义；除零不是整数除法异常。
 - 工程初始化、必要模块、集成测试与这个可执行能力一起交付；对象、函数、GC、JIT 和完整 Test262 runner 留待对应能力出现。
 
+### S00 实施约定
+
+- 测试入口沿用本计划的 CLI 与引擎值接口：`r8 -e` 验证输出、诊断和退出码；Rust 集成测试通过引擎库验证 Number 位模式和空 Script 完成值；`r8-eval` 验证真实执行接入及结果分类。
+- 用优先级解析直接生成栈式指令，由 VM 求值；暂不建立 AST，也不进行常量求值。公开 `eval(source)` 与可单独解析、重复执行的 `Script`，字节码留在库内。
+- 十进制范围为整数、小数与指数形式；数字分隔符、非十进制、BigInt 和旧式前导零数字留待后续。未覆盖的语法明确报告 Unsupported，不冒充 SyntaxError。
+- 按测试文件输入需要，将标准行注释和块注释作为词法空白提前实现，CLI 与 runner 共用。strict 指令、语句列表、ASI、标识符和其他值类型仍待后续。
+- Number 用 `f64`，值只包含 Undefined 和 Number；CLI 使用 [ryu-js](https://docs.rs/ryu-js/1.0.3/ryu_js/) 遵循十进制 Number::toString，避免 Rust 默认显示在负零、Infinity 和科学计数法上的差异。源码限 1 MiB、解析递归限 128 层；资源限制单独报告，不作为语言异常。
+- 参考 [Boa 的表达式解析](https://github.com/boa-dev/boa/blob/main/core/parser/src/parser/expression/mod.rs)、[字节码生成](https://github.com/boa-dev/boa/blob/main/core/engine/src/bytecompiler/expression/binary.rs)、[VM 指令](https://github.com/boa-dev/boa/blob/main/core/engine/src/vm/opcode/mod.rs)和[数值操作](https://github.com/boa-dev/boa/blob/main/core/engine/src/value/operations.rs)；值类型参考 [Nova 的显式枚举](https://github.com/trynova/nova/blob/main/nova_vm/src/ecmascript/types/language/value.rs)，本阶段不引入其堆句柄或紧凑表示。
+
 ### 完成条件
 
 - 上述三条命令符合预期。
@@ -76,6 +85,23 @@ cargo run -- -e '1 +'
 - 通过引擎值测试区分 `+0` 与 `-0`，而非仅比较 CLI 输出。
 - Rust 格式、lint 与测试通过；有效输入和非法输入都不会引发 Rust panic。
 - 产出可复现的构建与运行说明；本阶段完成后再展开 S01。
+
+### S00 规范覆盖
+
+下表只记录本切片；正式 Test262 全集的机器可读覆盖记录仍按第 6 节建立。范围外能力保持未实现，不将子集支持视为整条款完成。
+
+| 规范条款 | 当前覆盖及边界 | 验收入口 |
+| --- | --- | --- |
+| [White Space / Line Terminators / Comments](https://tc39.es/ecma262/2026/multipage/ecmascript-language-lexical-grammar.html#sec-white-space) | 标准空白、换行、行/块注释；无 Annex B HTML 注释扩展 | `tests/engine.rs`：空白集合、注释、未闭合注释和 token 分隔 |
+| [Numeric Literals](https://tc39.es/ecma262/2026/multipage/ecmascript-language-lexical-grammar.html#sec-literals-numeric-literals) | 部分：十进制整数、小数、指数及舍入；其他形式见 S00 边界 | `tests/engine.rs`：十进制、非法指数、数值边界及 Unsupported 分类 |
+| [Unary / Multiplicative / Additive Operators](https://tc39.es/ecma262/2026/multipage/ecmascript-language-expressions.html#sec-unary-operators) | 部分：Number 一元正负、五种二元算术、括号、优先级与左结合 | `tests/engine.rs`：运算顺序、分组、缺失操作数和尾随内容 |
+| [Number 数值操作](https://tc39.es/ecma262/2026/multipage/ecmascript-data-types-and-values.html#sec-ecmascript-language-types-number-type) | 部分：上述运算的 IEEE 754 行为，含 NaN、±0、Infinity、溢出和次正规数 | `tests/engine.rs`：直接核对引擎 Number 位模式 |
+| [Number::toString](https://tc39.es/ecma262/2026/multipage/ecmascript-data-types-and-values.html#sec-numeric-types-number-tostring) | 部分：CLI 十进制显示；尚无 JS 内建转换方法 | `tests/engine_cli.rs`：特殊值、科学计数法阈值和最短表示 |
+| [ScriptEvaluation](https://tc39.es/ecma262/2026/multipage/ecmascript-language-scripts-and-modules.html#sec-runtime-semantics-scriptevaluation) | 部分：单表达式和空 Script 完成结果；暂无 Realm、声明与语句列表 | `tests/engine.rs`、`tests/engine_cli.rs`：返回值、空输出、重复执行及退出码 |
+
+额外宿主保障：1 MiB 输入限制、128 层解析递归限制、长平坦表达式和固定种子的 4096 份短源码检查；`tests/eval_cli.rs` 验证资源限制不会被误记为语言异常。当前验证平台为 macOS；未声明其他平台已验收。
+
+验收结果：23 项 Rust 集成测试、`cargo fmt --check`、clippy 与三条 CLI 示例通过；自有 JS 集合为 5 个解析负例通过、39 个变体 skip。后者的缺口不计入 S00 算术值验证，也不代表完整 Test262 合规。
 
 ## 4. 后续纵向路线
 
