@@ -57,10 +57,13 @@ fn executes_raw_cases_and_preserves_real_error_phases() {
                 "e-wrong-phase.js",
                 "/*---\nflags: [raw]\nnegative:\n  phase: runtime\n  type: SyntaxError\n---*/\n1 +",
             ),
-            ("f-unsupported.js", "/*---\nflags: [raw]\n---*/\nlet x = 1;"),
+            (
+                "f-unsupported.js",
+                "/*---\nflags: [raw]\n---*/\nfunction f() {}",
+            ),
             (
                 "g-unsupported-negative.js",
-                "/*---\nflags: [raw]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nlet x = 1;",
+                "/*---\nflags: [raw]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nfunction f() {}",
             ),
             ("h-limited.js", &nested),
         ],
@@ -180,7 +183,7 @@ fn unsupported_capabilities_never_satisfy_positive_or_negative_tests() {
             ("a-positive.js", "assert.sameValue(1 + 2, 3);"),
             (
                 "b-parse.js",
-                "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nlet x = 1;",
+                "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nfunction f() {}",
             ),
             (
                 "c-runtime.js",
@@ -410,4 +413,123 @@ fn distinct_unix_paths_keep_distinct_test_ids() {
         ids,
         std::collections::BTreeSet::from([r"nested\case.js", "nested/case.js"])
     );
+}
+
+#[test]
+fn shared_harness_bindings_and_runtime_errors_preserve_phases() {
+    let directory = tempfile::tempdir().unwrap();
+    let harness = directory.path().join("harness");
+    fs::create_dir(&harness).unwrap();
+    fs::write(harness.join("assert.js"), "let shared = 3;").unwrap();
+    fs::write(harness.join("sta.js"), "var extra = shared + 1;").unwrap();
+    fs::write(harness.join("helper.js"), "var extra = extra + shared;").unwrap();
+    let output = run_files(
+        &[
+            (
+                "a-shared.js",
+                "/*---\nflags: [noStrict]\nincludes: [helper.js]\n---*/\nshared + extra;",
+            ),
+            (
+                "b-missing.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: runtime\n  type: ReferenceError\n---*/\nmissing;",
+            ),
+            (
+                "c-tdz.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: runtime\n  type: ReferenceError\n---*/\nx; let x = 3;",
+            ),
+            (
+                "d-early.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nmissing; let x; let x;",
+            ),
+            (
+                "e-conflict.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: runtime\n  type: SyntaxError\n---*/\nvar shared;",
+            ),
+            (
+                "f-parse-only.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nvar shared;",
+            ),
+        ],
+        &["--harness", harness.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report = report(&output);
+    assert_eq!(report["summary"]["pass"], 5);
+    assert_eq!(report["summary"]["fail"], 1);
+    assert_eq!(report["summary"]["skip"], 0);
+    assert_eq!(report["summary"]["harness-error"], 0);
+    assert_eq!(report["results"][1]["actual"]["phase"], "runtime");
+    assert_eq!(report["results"][1]["actual"]["name"], "ReferenceError");
+    assert_eq!(report["results"][3]["actual"]["phase"], "parse");
+    assert_eq!(report["results"][4]["actual"]["phase"], "runtime");
+    assert_eq!(report["results"][5]["actual"]["kind"], "completed");
+}
+
+#[test]
+fn harness_runtime_failures_cannot_satisfy_negative_tests() {
+    let directory = tempfile::tempdir().unwrap();
+    let harness = directory.path().join("harness");
+    fs::create_dir(&harness).unwrap();
+    fs::write(harness.join("assert.js"), "let shared = missing;").unwrap();
+    fs::write(harness.join("sta.js"), "").unwrap();
+    let output = run_files(
+        &[
+            (
+                "a-runtime.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: runtime\n  type: ReferenceError\n---*/\nmissing;",
+            ),
+            (
+                "b-parse.js",
+                "/*---\nflags: [noStrict]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nlet x; let x;",
+            ),
+        ],
+        &["--harness", harness.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report = report(&output);
+    assert_eq!(report["summary"]["pass"], 1);
+    assert_eq!(report["summary"]["harness-error"], 1);
+    assert!(
+        report["results"][0]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("assert.js")
+    );
+}
+
+#[test]
+fn workers_do_not_share_global_bindings() {
+    let output = run_files(
+        &[
+            (
+                "a-declare.js",
+                "/*---\nflags: [raw]\n---*/\nlet shared = 3;",
+            ),
+            (
+                "b-read.js",
+                "/*---\nflags: [raw]\nnegative:\n  phase: runtime\n  type: ReferenceError\n---*/\nshared;",
+            ),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(report(&output)["summary"]["pass"], 2);
+}
+
+#[test]
+fn s01_suite_executes_all_declared_variants() {
+    let output = run_path(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/cases/s01"),
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = report(&output);
+    assert_eq!(report["files"], 12);
+    assert_eq!(report["summary"]["total"], 12);
+    assert_eq!(report["summary"]["pass"], 12);
 }

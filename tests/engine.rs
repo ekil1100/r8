@@ -40,8 +40,8 @@ fn respects_operator_precedence_grouping_and_left_associativity() {
     }
     assert_eq!(eval("").unwrap(), Value::Undefined);
     let script = Script::parse(&String::from("(1 + 2) * 3")).unwrap();
-    assert_eq!(script.run(), Value::Number(9.0));
-    assert_eq!(script.run(), Value::Number(9.0));
+    assert_eq!(script.run().unwrap(), Value::Number(9.0));
+    assert_eq!(script.run().unwrap(), Value::Number(9.0));
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn handles_ecmascript_whitespace_and_comments_without_joining_tokens() {
     assert_eq!(number("// header\u{2028}2 * (3 /* 中 */ + 1)"), 8.0);
     assert_eq!(eval("/* empty */ // end").unwrap(), Value::Undefined);
     assert_eq!(eval("1/* gap */2").unwrap_err().kind, ErrorKind::Syntax);
-    assert_eq!(eval("1/*\n*/2").unwrap_err().kind, ErrorKind::Unsupported);
+    assert_eq!(eval("1/*\n*/2").unwrap(), Value::Number(2.0));
     assert_eq!(eval("/* unterminated").unwrap_err().kind, ErrorKind::Syntax);
     for character in ['\u{0085}', '\u{180e}', '\u{200b}', '\0'] {
         assert!(eval(&format!("1{character}+2")).is_err());
@@ -187,6 +187,7 @@ fn handles_ecmascript_whitespace_and_comments_without_joining_tokens() {
 #[test]
 fn reports_unsupported_syntax_without_executing_a_valid_prefix() {
     for source in [
+        "let x = 1; x = 2",
         "1++2",
         "1--2",
         "1**2",
@@ -195,14 +196,6 @@ fn reports_unsupported_syntax_without_executing_a_valid_prefix() {
         "1*=2",
         "1/=2",
         "1%=2",
-        "1; 2",
-        "1;;",
-        "1\n2",
-        ";",
-        "let x = 1; x + 2",
-        "undefined",
-        "NaN",
-        "Infinity",
         "true",
         "'2' + 1",
         "1(2)",

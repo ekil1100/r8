@@ -1,6 +1,6 @@
 # r8 ECMAScript 实现计划
 
-状态：S00 已完成并验收；下一切片 S01 尚未开始。引擎库、算术 CLI 与测试框架已共用真实解析和 VM 链路；JS 集合的剩余能力缺口见[测试说明](../evals/README.md)。
+状态：S00、S01 已完成并验收；下一切片 S02 尚未开始。文件/内联 CLI、可复用 Context 和测试框架共用真实解析与 VM 链路；JS 集合的能力边界见[测试说明](../evals/README.md)。
 
 目标：用 Rust 自研 ECMAScript 引擎，先交付可运行 MVP，再通过纵向切片扩展到固定版本的标准。开发方式与源码参考遵循 [AGENTS.md](../AGENTS.md)；本计划定义范围、顺序和验收依据。
 
@@ -38,10 +38,10 @@
 
 ### 拟定 CLI 契约
 
-以下为分阶段 CLI 契约；S00 的 `r8 -e` 与调用同一引擎库的 `r8-eval` 已实现：
+以下为分阶段 CLI 契约；S01 的 `r8 <file>`、`r8 -e` 与调用同一引擎库的 `r8-eval` 已实现：
 
 - S00 提供 `r8 -e '<source>'`；S01 增加 Script 文件入口；S16 增加显式 Module 文件入口。
-- `-e` 执行 Script，并在结果非 `undefined` 时输出其字符串表示。CLI 展示行为与引擎返回的语言值分开测试。
+- `-e` 或一个 UTF-8 文件路径执行 Script，二者互斥；位置参数只作为文件名。两种模式均在 Script 完成值非 `undefined` 时输出其字符串表示。CLI 展示行为与引擎返回的语言值分开测试。
 - 成功退出码为 `0`；语法错误、未捕获异常或执行失败为 `1`；命令行参数错误为 `2`。诊断写入 stderr，并区分标准异常、未实现和宿主资源限制。
 - S04 引入宿主函数 `print`，供 CLI 和测试观察副作用；它不是 ECMAScript 标准内建对象。
 - S14 起由宿主驱动 Promise Jobs。执行结果与 Job 完成情况分别处理，不能把队列为空等同于所有 Promise 已兑现。
@@ -101,7 +101,7 @@ cargo run -- -e '1 +'
 
 额外宿主保障：1 MiB 输入限制、128 层解析递归限制、长平坦表达式和固定种子的 4096 份短源码检查；`tests/eval_cli.rs` 验证资源限制不会被误记为语言异常。当前验证平台为 macOS；未声明其他平台已验收。
 
-验收结果：23 项 Rust 集成测试、`cargo fmt --check`、clippy 与三条 CLI 示例通过；自有 JS 集合为 5 个解析负例通过、39 个变体 skip。后者的缺口不计入 S00 算术值验证，也不代表完整 Test262 合规。
+S00 验收时结果：23 项 Rust 集成测试、`cargo fmt --check`、clippy 与三条 CLI 示例通过；自有 JS 集合为 5 个解析负例通过、39 个变体 skip。后者的缺口不计入 S00 算术值验证，也不代表完整 Test262 合规。
 
 ## 4. 后续纵向路线
 
@@ -131,6 +131,40 @@ cargo run -- -e '1 +'
 | S20 | 运行共享内存程序：`Atomics.add` 返回旧值并更新共享 TypedArray；两个 agent 能交换数据 | SharedArrayBuffer、growable shared buffer、全部 Atomics 方法、wait/notify/waitAsync、Agent Records 与内存模型。先建立安全的共享访问规则，再实现多 agent 测试宿主；普通共享访问也必须避免 Rust 数据竞争 UB，不要求实现 Web Worker API。 |
 | S21 | 运行目标版本的全部必需语法与内建行为 | 按覆盖记录逐项关闭剩余缺口：词法上下文、Unicode、ASI、early errors、strict/sloppy 差异、内建属性描述符与原型关系、继承/构造交互、宿主抽象操作和 Forbidden Extensions。每个缺口仍以独立可运行用例交付，不用一个“补齐标准”大任务替代。 |
 | S22 | 验收目标版本兼容性 | 满足第 7 节全部条件，发布规范基线、宿主配置、测试 revision、覆盖结果与资源限制；明确与浏览器/Node.js 运行环境的差异。 |
+
+### S01 实施与验收
+
+可运行入口：
+
+```sh
+cargo run --locked -- -e 'let x = 3; x + 2'
+# Expected stdout: 5
+cargo run --locked -- evals/cases/s01/declarations.js
+# Expected stdout: 5
+cargo run --locked -- -e 'x; let x = 3;'
+# Expected: ReferenceError on stderr; exit code 1
+```
+
+- 延续直接生成栈式指令的实现，不新增 AST 或另一条解释执行路径。编译期间收集作用域词法声明及嵌套 `var` 名称，检查重声明与冲突；Script/块执行前实例化相应绑定。
+- 支持 Number/Undefined 子集中的语句列表、空语句、块、声明列表、`let` / `const` / `var`、变量读取、提升和 TDZ；声明及空语句不覆盖已有完成值。`var` 在 Script 全局作用域初始化为 Undefined，词法绑定用独立的未初始化状态表示 TDZ。
+- `Script::run` / 顶层 `eval` 使用新上下文；新增 `Context::run` / `Context::eval` 保留跨 Script 全局绑定。运行返回 `Result<Value, Error>`，直接替换旧的无错误 `run` 接口。解析/early errors 不改变上下文，运行期错误保留已实例化的全局绑定并释放本次块环境。
+- runner 同一变体的 harness 和测试体共用一个 `Context`，不同变体保持隔离。parse-only 不运行 Script、不实例化全局声明。解析冲突与跨 Script 全局冲突分别报告 parse / SyntaxError 和 runtime / SyntaxError；TDZ、未绑定读取报告 runtime / ReferenceError；harness 错误不能满足测试体负例。
+- Unicode 标识符采用 `unicode-id-start` 1.4.0 的 Unicode 17.0 ID 属性表，而不是 Rust 的 XID 属性；显式处理 `$`、`_`、ZWNJ、ZWJ、Unicode 转义和保留字。不规范化标识符。保留 S00 的标准空白、行/块注释，补上当前语句语法的 ASI。
+- 可读取全局 `undefined`、`NaN`、`Infinity`，并保持这些全局属性在非严格模式下只读；块内可使用同名词法绑定。全局词法声明不能覆盖这些受限属性。Undefined 的当前算术转换为 NaN。
+- 普通赋值、更新及其他运算仍属于 S02；strict 指令、字符串及其他值类型、解构、控制流、函数、对象和完整全局环境仍按后续路线实现。不提供 REPL/stdin，不支持 hashbang。涉及未实现全局内建对象的 `var` 声明报告 Unsupported，不模拟其对象属性行为。
+- 文件及内联源码共用 1 MiB 上限；文件读取在上限加一个字节处截断检测。块和表达式共享 128 层解析递归上限，平坦语句列表和表达式使用迭代处理。
+
+实现参考：[Boa 的声明 early errors](https://github.com/boa-dev/boa/blob/main/core/parser/src/parser/statement/declaration/lexical.rs)、[块声明实例化](https://github.com/boa-dev/boa/blob/main/core/engine/src/bytecompiler/statement/block.rs)、[环境链变量读取](https://github.com/boa-dev/boa/blob/main/core/engine/src/vm/opcode/get/name.rs)与[标识符规则](https://github.com/boa-dev/boa/blob/main/core/parser/src/lexer/identifier.rs)。runner 继续遵循已锁定的 Test262 `INTERPRETING.md`，不改变 harness 副本。
+
+| 规范条款 | S01 覆盖及边界 | 验收入口 |
+| --- | --- | --- |
+| [Names and Keywords](https://tc39.es/ecma262/2026/multipage/ecmascript-language-lexical-grammar.html#sec-names-and-keywords) | ID 属性、转义、保留字；当前仅非严格 Script 的标识符上下文 | `tests/s01.rs`：Unicode、转义、同名检查及非法绑定 |
+| [Automatic Semicolon Insertion](https://tc39.es/ecma262/2026/multipage/ecmascript-language-lexical-grammar.html#sec-automatic-semicolon-insertion) | 当前声明、表达式、空语句、块所需的 ASI；未实现语法不猜测执行 | `tests/s01.rs`：换行、注释、表达式延续和缺失分号 |
+| [Block / Variable Statement / Let and Const](https://tc39.es/ecma262/2026/multipage/ecmascript-language-statements-and-declarations.html#sec-let-and-const-declarations) | 简单绑定声明、声明列表、块作用域和嵌套 var 冲突；无解构 | `tests/s01.rs`、`evals/cases/s01/` |
+| [Environment Records](https://tc39.es/ecma262/2026/multipage/executable-code-and-execution-contexts.html#sec-environment-records) | 当前绑定的创建、初始化和查找；TDZ、未绑定读取；无函数/对象环境 | `tests/s01.rs`：提升、遮蔽、上下文共享及错误后的状态 |
+| [ScriptEvaluation / GlobalDeclarationInstantiation](https://tc39.es/ecma262/2026/multipage/ecmascript-language-scripts-and-modules.html#sec-globaldeclarationinstantiation) | 多语句完成值、全局声明冲突与已有绑定；无完整 Realm/全局对象 | `tests/s01.rs`、`tests/engine_cli.rs`、`tests/eval_cli.rs` |
+
+验收结果：`cargo fmt --check`、clippy、42 项 Rust 集成测试及上述 CLI 示例均通过，含 4096 份 S00 短源码和 2048 份 S01 语句片段的固定种子检查。S01 JS 集合 12 个 raw 变体全部通过（4 正常完成、4 parse 负例、4 runtime 负例）；S00 集合仍为 5 个通过、39 个 skip。正例的具体完成值由 Rust 集成测试核对；不声明完整 Test262 合规。验证平台仍为 macOS。
 
 ### 顺序中的硬依赖
 

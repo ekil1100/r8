@@ -2,14 +2,14 @@
 
 本框架的测试对象只有 r8。用例保存在 `.js` 中，以 JS 断言或 Test262 `negative` metadata 表达预期；Rust 负责发现、准备、隔离与报告。
 
-`src/eval/executor.rs` 的 `execute_r8` 已接入 r8 的 S00 引擎库。raw 算术用例可以执行，范围内的 parse 负例由真实解析器判定；依赖 strict 指令、更新运算、其他值类型或官方断言 harness 的用例仍报告 unsupported/skip。
+`src/eval/executor.rs` 的 `execute_r8` 已接入 r8 的 S00/S01 引擎库。raw 算术和变量/块作用域用例可以执行；parse 负例由真实解析器判定，TDZ 和未绑定读取等 runtime 负例由真实 VM 判定。依赖 strict 指令、更新运算、其他值类型或完整官方断言 harness 的用例仍报告 unsupported/skip。
 
 ## 运行
 
 在仓库根目录执行：
 
 ```sh
-cargo run --bin r8-eval -- evals/cases/s00
+cargo run --bin r8-eval -- evals/cases/s01
 ```
 
 也可传入单个 `.js` 文件。目录按路径排序递归发现测试，不展开目录中的符号链接；文件名包含 `_FIXTURE` 时不作为独立测试。命令只接收测试及框架选项，不接收外部引擎命令。
@@ -18,7 +18,7 @@ cargo run --bin r8-eval -- evals/cases/s00
 
 ```sh
 mkdir -p target/eval
-cargo run --bin r8-eval -- evals/cases/s00 > target/eval/r8.json
+cargo run --bin r8-eval -- evals/cases/s01 > target/eval/r8.json
 ```
 
 默认使用仓库中的官方 harness 副本，[来源、版本与许可证](harness/README.md)单独记录。`--harness` 可指定其他 harness 目录。选项见 `cargo run --bin r8-eval -- --help`。
@@ -52,7 +52,9 @@ negative:
 
 需要观察独立 Script 的完成值时，用例可调用 `$262.evalScript`；该宿主接口也需要在 r8 中实现，目前不能执行。
 
-`cases/s00/` 检查 S00 算术行为，但 JS 断言依赖函数、对象、异常等能力。目前 44 个变体中有 5 个非严格模式解析负例通过、39 个 skip；算术值、负零等由 `tests/engine.rs` 和 `tests/engine_cli.rs` 通过同一真实执行链路验证。阶段边界见[实现计划](../.agents/ecmascript-plan.md)。
+`cases/s00/` 检查 S00 算术行为，但 JS 断言依赖函数、对象、异常等能力。目前 44 个变体中有 5 个非严格模式解析负例通过、39 个 skip。
+
+`cases/s01/` 包含 12 个 raw 变体，当前全部通过：4 个正常完成用例、4 个 parse 负例和 4 个 runtime 负例。raw 正例只验证正常完成，不把最终值作为宿主侧断言；算术值、负零、作用域和 Script 完成值由 `tests/engine.rs`、`tests/s01.rs`、`tests/engine_cli.rs` 通过同一真实执行链路验证。阶段边界见[实现计划](../.agents/ecmascript-plan.md)。
 
 ## 当前已实现的准备流程
 
@@ -75,14 +77,14 @@ negative:
 
 每个可准备的变体启动同一 Rust 二进制的内部 worker，不从 PATH 查找引擎。JSON 是父子进程之间的内部传输格式，不是外部引擎插件协议。
 
-`executor.rs::execute_r8` 与 CLI 共用 `r8::Script::parse` 和 `Script::run`：
+`executor.rs::execute_r8` 与 CLI 共用 `r8::Script::parse` 和 `Context::run`：
 
 1. 单独解析并编译测试体，区分真实语法错误、未实现能力和宿主资源限制。`parse_only` 请求到此结束，不执行测试体或解析/执行 harness；解析成功不能满足 parse 负例。
-2. 需要求值时，按准备顺序解析并执行 harness，再运行测试体。harness 的未实现能力报告 skip，其他 harness 故障报告 harness-error；均不能满足测试体的 negative 预期。输入文件存在性和路径安全检查仍在 worker 启动前完成。
-3. 正常完成报告 completed；语法错误报告 parse 阶段与 SyntaxError。`negative` 同时匹配阶段与类型。宿主资源限制报告 harness-error，不伪装为语言异常。
+2. 需要求值时，为该变体创建独立 `Context`，按准备顺序解析并执行 harness，再运行测试体；全局绑定在这些 Script 间共享。harness 的未实现能力报告 skip，其他解析/运行故障报告 harness-error；均不能满足测试体的 negative 预期。输入文件存在性和路径安全检查仍在 worker 启动前完成。
+3. 正常完成报告 completed；解析及 early errors 报告 parse / SyntaxError；TDZ、未绑定名称报告 runtime / ReferenceError；跨 Script 的全局声明冲突发生于声明实例化，报告 runtime / SyntaxError。`negative` 同时匹配阶段与类型。宿主资源限制报告 harness-error，不伪装为语言异常。
 4. 缺失能力保持 unsupported；更新运算等未支持语法中的负例也不能猜测为 SyntaxError。执行到未知语法时不采信已解析的前缀。
 
-S00 只有无状态算术和独立操作数栈，暂无 Realm、全局绑定或 `$262` 接口。引入状态后，同一变体的 harness 和测试体必须共享执行上下文，不同变体保持隔离；引入语言异常后再补 runtime 类型映射。完整 Test262 集合、异步、Module、多 Realm、GC、buffer detach 和 agent 接口按实现计划逐项补齐。
+S01 已提供有状态全局绑定、块环境与运行期错误报告，但暂无完整 Realm、全局对象、Error 对象或 `$262` 接口；错误类型来自引擎错误分类，不是源码模式匹配。完整 Test262 集合、异常对象、异步、Module、多 Realm、GC、buffer detach 和 agent 接口按实现计划逐项补齐。
 
 ## 报告与资源限制
 
@@ -103,4 +105,4 @@ S00 只有无状态算术和独立操作数栈，暂无 Realm、全局绑定或 
 - 只回收直接子进程；未来测试宿主派生的进程由宿主负责管理。耗时包含进程启动，不作为解释器吞吐量基准。
 - 进程隔离不是安全沙箱；只运行可信用例，不隔离宿主文件、网络或凭据。
 
-框架自检通过公开 CLI 验证发现、metadata、输入边界、无外部程序依赖、raw 执行、parse 负例、harness 失败与资源限制分类。完整断言、运行期异常和宿主行为仍待对应能力实现后验收。
+框架自检通过公开 CLI 验证发现、metadata、输入边界、无外部程序依赖、raw 执行、parse/runtime 负例、共享 harness 绑定、变体隔离、harness 失败与资源限制分类。完整断言、语言级异常对象/捕获和宿主行为仍待对应能力实现后验收。

@@ -1,8 +1,13 @@
 use crate::{Error, ErrorKind};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Kind {
     Number(f64),
+    Identifier(String),
+    Assign,
+    Comma,
+    OpenBrace,
+    CloseBrace,
     Plus,
     Minus,
     Star,
@@ -18,8 +23,10 @@ pub(crate) struct Token {
     pub kind: Kind,
     pub offset: usize,
     pub line_break_before: bool,
+    pub escaped: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct Lexer<'a> {
     source: &'a str,
     offset: usize,
@@ -38,6 +45,7 @@ impl<'a> Lexer<'a> {
                 kind: Kind::End,
                 offset,
                 line_break_before,
+                escaped: false,
             });
         };
         if character.is_ascii_digit()
@@ -52,10 +60,20 @@ impl<'a> Lexer<'a> {
                 kind: Kind::Number(self.number()?),
                 offset,
                 line_break_before,
+                escaped: false,
+            });
+        }
+        if is_identifier_start(character) || character == '\\' {
+            let (name, escaped) = self.identifier()?;
+            return Ok(Token {
+                kind: Kind::Identifier(name),
+                offset,
+                line_break_before,
+                escaped,
             });
         }
         let rest = &self.source[offset..];
-        if ["++", "--", "**", "+=", "-=", "*=", "/=", "%="]
+        if ["++", "--", "**", "+=", "-=", "*=", "/=", "%=", "==", "=>"]
             .iter()
             .any(|operator| rest.starts_with(operator))
         {
@@ -75,6 +93,10 @@ impl<'a> Lexer<'a> {
             '(' => Kind::OpenParen,
             ')' => Kind::CloseParen,
             ';' => Kind::Semicolon,
+            '=' => Kind::Assign,
+            ',' => Kind::Comma,
+            '{' => Kind::OpenBrace,
+            '}' => Kind::CloseBrace,
             '@' => {
                 return Err(Error::new(
                     ErrorKind::Syntax,
@@ -82,7 +104,7 @@ impl<'a> Lexer<'a> {
                     "Unexpected character.",
                 ));
             }
-            character if character.is_control() => {
+            character if character.is_control() || !character.is_ascii() => {
                 return Err(Error::new(
                     ErrorKind::Syntax,
                     offset,
@@ -93,7 +115,7 @@ impl<'a> Lexer<'a> {
                 return Err(Error::new(
                     ErrorKind::Unsupported,
                     offset,
-                    "Syntax outside the r8 arithmetic subset.",
+                    "Syntax outside the implemented r8 subset.",
                 ));
             }
         };
@@ -101,6 +123,7 @@ impl<'a> Lexer<'a> {
             kind,
             offset,
             line_break_before,
+            escaped: false,
         })
     }
 
@@ -130,6 +153,84 @@ impl<'a> Lexer<'a> {
                 _ => return Ok(line_break),
             }
         }
+    }
+
+    fn identifier(&mut self) -> Result<(String, bool), Error> {
+        let mut name = String::new();
+        let mut escaped = false;
+        while let Some(character) = self.source[self.offset..].chars().next() {
+            let valid = if name.is_empty() {
+                is_identifier_start
+            } else {
+                is_identifier_part
+            };
+            let character = if character == '\\' {
+                let offset = self.offset;
+                let character = self.unicode_escape()?;
+                if !valid(character) {
+                    return Err(Error::new(
+                        ErrorKind::Syntax,
+                        offset,
+                        "Invalid escaped identifier character.",
+                    ));
+                }
+                escaped = true;
+                character
+            } else if valid(character) {
+                self.offset += character.len_utf8();
+                character
+            } else {
+                break;
+            };
+            name.push(character);
+        }
+        Ok((name, escaped))
+    }
+
+    fn unicode_escape(&mut self) -> Result<char, Error> {
+        let start = self.offset;
+        let invalid = || {
+            Error::new(
+                ErrorKind::Syntax,
+                start,
+                "Invalid Unicode escape in identifier.",
+            )
+        };
+        if !self.source[start..].starts_with("\\u") {
+            return Err(invalid());
+        }
+        self.offset += 2;
+        let braced = self.source.as_bytes().get(self.offset) == Some(&b'{');
+        if braced {
+            self.offset += 1;
+        }
+        let mut value = 0_u32;
+        let mut count = 0;
+        loop {
+            if braced && self.source.as_bytes().get(self.offset) == Some(&b'}') {
+                self.offset += 1;
+                break;
+            }
+            if !braced && count == 4 {
+                break;
+            }
+            let digit = self.source[self.offset..]
+                .chars()
+                .next()
+                .and_then(|character| character.to_digit(16))
+                .ok_or_else(invalid)?;
+            value = value
+                .checked_mul(16)
+                .and_then(|value| value.checked_add(digit))
+                .filter(|value| *value <= 0x10ffff)
+                .ok_or_else(invalid)?;
+            self.offset += 1;
+            count += 1;
+        }
+        if count == 0 {
+            return Err(invalid());
+        }
+        char::from_u32(value).ok_or_else(invalid)
     }
 
     fn digits(&mut self) {
@@ -184,22 +285,23 @@ impl<'a> Lexer<'a> {
             }
             self.digits();
         }
-        match bytes.get(self.offset) {
-            Some(b'_' | b'n') => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    self.offset,
-                    "Numeric separators and BigInt literals are not implemented.",
-                ));
-            }
-            Some(b'a'..=b'z' | b'A'..=b'Z' | b'$' | b'\\') => {
-                return Err(Error::new(
-                    ErrorKind::Syntax,
-                    self.offset,
-                    "An identifier cannot immediately follow a numeric literal.",
-                ));
-            }
-            _ => {}
+        if let Some(b'_' | b'n') = bytes.get(self.offset) {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                self.offset,
+                "Numeric separators and BigInt literals are not implemented.",
+            ));
+        }
+        if self.source[self.offset..]
+            .chars()
+            .next()
+            .is_some_and(|character| is_identifier_start(character) || character == '\\')
+        {
+            return Err(Error::new(
+                ErrorKind::Syntax,
+                self.offset,
+                "An identifier cannot immediately follow a numeric literal.",
+            ));
         }
         self.source[start..self.offset]
             .parse()
@@ -218,4 +320,13 @@ fn is_whitespace(character: char) -> bool {
         '\t' | '\u{000b}' | '\u{000c}' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
             ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
     )
+}
+
+fn is_identifier_start(character: char) -> bool {
+    matches!(character, '$' | '_') || unicode_id_start::is_id_start(character)
+}
+
+fn is_identifier_part(character: char) -> bool {
+    matches!(character, '$' | '_' | '\u{200c}' | '\u{200d}')
+        || unicode_id_start::is_id_continue(character)
 }

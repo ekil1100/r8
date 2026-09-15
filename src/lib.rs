@@ -1,10 +1,15 @@
 #![forbid(unsafe_code)]
 
 mod compiler;
+mod environment;
 mod lexer;
 mod vm;
 
 use std::fmt;
+
+pub use environment::Context;
+
+pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
@@ -24,6 +29,7 @@ impl fmt::Display for Value {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Syntax,
+    Reference,
     Unsupported,
     ResourceLimit,
 }
@@ -32,15 +38,15 @@ pub enum ErrorKind {
 pub struct Error {
     pub kind: ErrorKind,
     pub offset: usize,
-    pub message: &'static str,
+    pub message: String,
 }
 
 impl Error {
-    fn new(kind: ErrorKind, offset: usize, message: &'static str) -> Self {
+    fn new(kind: ErrorKind, offset: usize, message: impl Into<String>) -> Self {
         Self {
             kind,
             offset,
-            message,
+            message: message.into(),
         }
     }
 }
@@ -49,6 +55,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self.kind {
             ErrorKind::Syntax => "SyntaxError",
+            ErrorKind::Reference => "ReferenceError",
             ErrorKind::Unsupported => "Unsupported",
             ErrorKind::ResourceLimit => "ResourceLimit",
         };
@@ -61,22 +68,22 @@ impl std::error::Error for Error {}
 #[derive(Debug)]
 pub struct Script {
     code: Vec<vm::Instruction>,
+    lexical: Vec<environment::Declaration>,
+    variables: Vec<environment::Declaration>,
 }
 
 impl Script {
     /// Parse and compile a Script without executing it.
     pub fn parse(source: &str) -> Result<Self, Error> {
-        Ok(Self {
-            code: compiler::compile(source)?,
-        })
+        compiler::compile(source)
     }
 
-    /// Execute compiler-produced instructions with a fresh operand stack.
-    pub fn run(&self) -> Value {
-        vm::run(&self.code)
+    /// Execute in a fresh context. Use Context::run to share global bindings.
+    pub fn run(&self) -> Result<Value, Error> {
+        Context::default().run(self)
     }
 }
 
 pub fn eval(source: &str) -> Result<Value, Error> {
-    Ok(Script::parse(source)?.run())
+    Script::parse(source)?.run()
 }

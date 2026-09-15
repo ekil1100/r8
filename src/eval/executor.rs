@@ -79,38 +79,46 @@ pub fn worker() -> io::Result<()> {
 fn execute_r8(request: &Request) -> Outcome {
     let script = match r8::Script::parse(&request.source) {
         Ok(script) => script,
-        Err(error) => {
-            let message = format!("r8: {}: {error}", request.filename);
-            return match error.kind {
-                r8::ErrorKind::Syntax => Outcome::Error {
-                    phase: Phase::Parse,
-                    name: Some("SyntaxError".into()),
-                    message,
-                },
-                r8::ErrorKind::Unsupported => Outcome::Unsupported { reason: message },
-                r8::ErrorKind::ResourceLimit => Outcome::HarnessError { message },
-            };
-        }
+        Err(error) => return language_outcome(error, Phase::Parse, &request.filename),
     };
     if request.parse_only {
         return Outcome::Completed {};
     }
+    let mut context = r8::Context::default();
     for helper in &request.harness {
-        match r8::Script::parse(&helper.source) {
-            Ok(helper) => {
-                helper.run();
-            }
-            Err(error) => {
-                let message = format!("r8 harness {}: {error}", helper.filename);
-                return match error.kind {
-                    r8::ErrorKind::Unsupported => Outcome::Unsupported { reason: message },
-                    _ => Outcome::HarnessError { message },
-                };
-            }
+        if let Err(error) =
+            r8::Script::parse(&helper.source).and_then(|script| context.run(&script))
+        {
+            let message = format!("r8 harness {}: {error}", helper.filename);
+            return match error.kind {
+                r8::ErrorKind::Unsupported => Outcome::Unsupported { reason: message },
+                _ => Outcome::HarnessError { message },
+            };
         }
     }
-    script.run();
-    Outcome::Completed {}
+    match context.run(&script) {
+        Ok(_) => Outcome::Completed {},
+        Err(error) => language_outcome(error, Phase::Runtime, &request.filename),
+    }
+}
+
+fn language_outcome(error: r8::Error, phase: Phase, filename: &str) -> Outcome {
+    let message = format!("r8: {filename}: {error}");
+    match error.kind {
+        r8::ErrorKind::Syntax | r8::ErrorKind::Reference => Outcome::Error {
+            phase,
+            name: Some(
+                match error.kind {
+                    r8::ErrorKind::Syntax => "SyntaxError",
+                    _ => "ReferenceError",
+                }
+                .into(),
+            ),
+            message,
+        },
+        r8::ErrorKind::Unsupported => Outcome::Unsupported { reason: message },
+        r8::ErrorKind::ResourceLimit => Outcome::HarnessError { message },
+    }
 }
 
 fn capture(request: &Request, timeout: Duration) -> io::Result<(Stop, Vec<u8>, Vec<u8>)> {
